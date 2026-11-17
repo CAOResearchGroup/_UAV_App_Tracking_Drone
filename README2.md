@@ -32,11 +32,15 @@ File demo có `require-sim` để chặn chạy nhầm trên kết nối thật.
 Hoàn thành setup trong [README1.md](README1.md), sau đó chạy:
 
 ```sh
-cd /Users/vungocson0503/Desktop/Python_Multi_Drone
+cd /[...]/Python_Multi_Drone
 .venv/bin/python run_cli.py --config config/px4.json --connect udpin:0.0.0.0:14550 --plots
 ```
 
 Bỏ `--plots` nếu chỉ dùng CLI. Không thêm `--sim` khi kết nối thật. Module Wi-Fi phải chuyển MAVLink cả hai chiều: nhìn thấy telemetry chưa chứng minh đường gửi lệnh ngược về PX4 đã hoạt động.
+
+Trong cửa sổ đồ thị, dùng **Tần số telemetry theo drone / nhóm** ở cột trái: chọn drone, chọn nhóm rồi chọn Hz để gửi yêu cầu ngay. `vehicle`: 5–100 Hz; `localPosition` và `localPositionSetpoint`: 5–50 Hz; các nhóm còn lại: 5–30 Hz; tất cả bước 5 Hz. Mặc định lần kết nối mới: `vehicle`/`localPosition` 20 Hz, nhóm khác 5 Hz. Đổi nhóm/drone để xem lại lựa chọn riêng. Cài đặt giữ khi đóng/mở đồ thị, đặt lại khi kết nối lại.
+
+Theo dõi trạng thái chấp nhận/từ chối và **Thực nhận** ngay dưới bộ chọn; rê chuột để xem Hz từng trường và phản hồi từng message. Tần số yêu cầu phụ thuộc khả năng PX4, nguồn dữ liệu và đường truyền, không đảm bảo đủ Hz. Đồ thị giữ từng mẫu thực nhận, vẽ theo lô 10 lần/giây; dữ liệu 100 Hz vẫn có thể có 100 điểm/giây. Không tạo điểm giả để bù mẫu thiếu. Tràn bộ đệm đồ thị sẽ có thông báo số gói mẫu mất. `rate_hz` trong config là tần số điều khiển riêng, không thay đổi bởi bộ chọn này.
 
 Khi thử trên bàn, tháo cánh quạt; không thực hiện quy trình cất cánh ở mục 4 trên bàn. Chỉ thực hiện lệnh bay thật trong điều kiện thử bay phù hợp và có người điều khiển sẵn sàng tiếp quản. Theo tài liệu dự án, phần mềm chưa được kiểm chứng trên PX4 SITL/HITL hoặc chuyến bay thật.
 

@@ -159,7 +159,9 @@ plot close
 
 Có thể chọn toàn bộ 52 trường telemetry; đây là các đại lượng đo/trạng thái, không phải mọi parameter cấu hình `params list`. Giá trị boolean vẽ 0/1; enum vẽ mã số; vị trí/setpoint hiển thị **local NED của chính drone**. Muốn so vị trí thực với mục tiêu autopilot trả về, kéo `localPosition.x` và `localPositionSetpoint.x` vào cùng ô; setpoint không được PX4 phát thì đường đó vẫn trống.
 
-Hiển thị lấy snapshot tối đa 10 Hz, giữ lịch sử tối đa 120 s, có giới hạn số điểm. Đây là đồ thị giám sát được giảm mẫu, không phải bản ghi đủ mọi gói 20–50 Hz. Timestamp dùng thời điểm máy tính nhận mẫu; không phải đồng bộ clock giữa các drone. Mất/cũ dữ liệu thì ngắt nét, không điền số 0. Kết nối lại sẽ xóa lịch sử cũ; không lưu bố cục khi đóng cửa sổ ở phiên bản này. Log telemetry gốc tiếp tục nằm trong `logs/`.
+Chọn **Tần số telemetry theo drone / nhóm** ở cột trái: vehicle 5–100 Hz; localPosition/localPositionSetpoint 5–50 Hz; nhóm khác 5–30 Hz; bước 5 Hz, áp dụng ngay khi chọn. Trạng thái ACK và tần số thực nhận ở dưới bộ chọn, rê chuột để xem từng trường. Yêu cầu được chấp nhận không đảm bảo đủ Hz nếu nguồn dữ liệu hoặc đường truyền bị giới hạn.
+
+Hiển thị vẽ theo lô tối đa 10 lần/giây nhưng giữ từng mẫu thực nhận, lịch sử tối đa 120 s và 12.002 điểm/trường. Nếu bộ đệm truyền đồ thị 20.000 gói mẫu bị tràn, giao diện báo số gói mẫu mất và ngắt nét. Timestamp dùng thời điểm máy tính nhận mẫu; không phải đồng bộ clock giữa các drone. Mất/cũ dữ liệu thì ngắt nét, không điền số 0. Kết nối lại xóa lịch sử và đặt tần số về mặc định; không lưu bố cục khi đóng cửa sổ ở phiên bản này. Log telemetry gốc tiếp tục nằm trong `logs/`.
 
 Các cửa sổ con cùng dùng dữ liệu của phiên hiện tại, không tạo thêm kết nối MAVLink. Đóng cửa sổ đồ thị chính hoặc `plot close` sẽ đóng cả các cửa sổ con; CLI và điều khiển vẫn chạy. Sau khi cập nhật source, dùng `plot close` rồi `plot open` để tiến trình đồ thị nạp code mới, không cần khởi động lại kết nối drone.
 

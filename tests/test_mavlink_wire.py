@@ -54,6 +54,13 @@ class WireTests(unittest.TestCase):
         command = parser.parse_char(data)
         self.assertEqual((command.target_system, command.target_component, command.command), (2, 1, 176))
         self.assertEqual((command.param1, command.param2, command.param3), (1., 3., 0.))
+        # Stream rate changes are command 511 in microseconds, addressed to one vehicle.
+        for hz, message_id in ((100, 30), (50, 32), (5, 147)):
+            transport.command(2, 1, 511, [float(message_id), 1e6/hz])
+            data, _ = peer.recvfrom(4096)
+            request = parser.parse_char(data)
+            self.assertEqual((request.target_system, request.target_component, request.command), (2, 1, 511))
+            self.assertEqual((request.param1, request.param2), (message_id, 1e6/hz))
         # Preserve raw UTF-8 bytes across a split inside a multi-byte character.
         raw = ("A"*49+"ế error").encode("utf-8")
         sender.statustext_send(3, raw[:50], 7, 0)

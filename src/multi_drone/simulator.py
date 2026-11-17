@@ -10,6 +10,7 @@ from .commands import MODE_PARAMS
 from .connection import Transport
 from .models import Packet, Target, Vec3
 from .parameters import decode_parameter, encode_parameter
+from .telemetry_rates import STREAMS
 
 
 @dataclass
@@ -37,16 +38,32 @@ class SimTransport(Transport):
         self.lock = threading.RLock()
         self.incoming = queue.Queue()
         self.started = self.updated = time.monotonic()
-        self.last_fast = self.last_slow = -math.inf
         self.sequence = 0
         self.closed = False
         self.drones = {}
+        self.stream_rates = {}
+        self.stream_sent = {}
         for d in config.drones:
             p = Vec3(d.offset.x, d.offset.y, 0)
             self.drones[d.system_id] = SimDrone(d.system_id, p, p)
             self.drones[d.system_id].params["MAV_SYS_ID"] = (d.system_id, 6)
 
-    def _emit(self, drone, kind, **data):
+    MESSAGE_IDS = {"HEARTBEAT": 0, "SYS_STATUS": 1, "GPS_RAW_INT": 24, "ATTITUDE": 30,
+                   "LOCAL_POSITION_NED": 32, "GLOBAL_POSITION_INT": 33, "VFR_HUD": 74,
+                   "POSITION_TARGET_LOCAL_NED": 85, "ALTITUDE": 141, "BATTERY_STATUS": 147,
+                   "ESTIMATOR_STATUS": 230, "HOME_POSITION": 242, "EXTENDED_SYS_STATE": 245}
+
+    def _emit(self, drone, kind, _force=False, **data):
+        if kind in self.MESSAGE_IDS and not _force:
+            key = (drone.system_id, self.MESSAGE_IDS[kind])
+            hz = self.stream_rates.get(key, STREAMS[key[1]])
+            now = time.monotonic()
+            previous = self.stream_sent.get(key)
+            if hz <= 0 or (previous is not None and now-previous < 1/hz):
+                return
+            # Keep phase when scheduling is late, without emitting fake catch-up samples.
+            self.stream_sent[key] = (now if previous is None else
+                                     previous+max(1, int((now-previous)*hz))/hz)
         if not drone.dropped:
             self.sequence = (self.sequence+1) % 256
             self.incoming.put(Packet(drone.system_id, 1, kind, data, self.sequence))
@@ -57,8 +74,13 @@ class SimTransport(Transport):
                 return None
             now = time.monotonic()
             self._update(now)
+            now = time.monotonic()
+            deadlines = [last+1/hz-now for key, last in self.stream_sent.items()
+                         if (hz := self.stream_rates.get(key, STREAMS[key[1]])) > 0
+                         and last+1/hz > now]
+            wait = min(timeout, min(deadlines, default=.01))
         try:
-            return self.incoming.get(timeout=min(timeout, 0.01))
+            return self.incoming.get(timeout=max(0, wait))
         except queue.Empty:
             return None
 
@@ -83,39 +105,39 @@ class SimTransport(Transport):
                     drone.mode, drone.target, drone.landed, drone.armed = "HOLD", None, 1, False
             else:
                 drone.velocity = Vec3(0, 0, 0)
-        if now-self.last_fast >= 0.045:
-            self.last_fast = now
-            for drone in self.drones.values():
-                if not drone.frozen:
-                    stamp = int((now-self.started)*1000)
-                    p, v = drone.position, drone.velocity
-                    self._emit(drone, "LOCAL_POSITION_NED", time_boot_ms=stamp, x=p.x, y=p.y, z=p.z, vx=v.x, vy=v.y, vz=v.z)
-                    self._emit(drone, "ATTITUDE", time_boot_ms=stamp, roll=0., pitch=0., yaw=0., rollspeed=0., pitchspeed=0., yawspeed=0.)
-                    self._emit(drone, "VFR_HUD", groundspeed=math.hypot(v.x, v.y), climb=-v.z, throttle=50 if drone.armed else 0)
-                    target = drone.target
-                    if target:
-                        pos, vel = target.position, target.velocity
-                        self._emit(drone, "POSITION_TARGET_LOCAL_NED", time_boot_ms=stamp, coordinate_frame=1,
-                                   type_mask=56 if pos else 7, x=pos.x if pos else 0., y=pos.y if pos else 0., z=pos.z if pos else 0.,
-                                   vx=vel.x if vel else 0., vy=vel.y if vel else 0., vz=vel.z if vel else 0.)
-        if now-self.last_slow >= 0.25:
-            self.last_slow = now
-            for drone in self.drones.values():
-                self._heartbeat(drone)
-                self._emit(drone, "EXTENDED_SYS_STATE", landed_state=drone.landed)
-                self._emit(drone, "HOME_POSITION", altitude=10000)
-                self._emit(drone, "BATTERY_STATUS", id=0, voltages=[12000]+[65535]*9, current_battery=200,
-                           battery_remaining=90, current_consumed=100, temperature=2500, time_remaining=600, charge_state=1)
-                self._emit(drone, "ESTIMATOR_STATUS", flags=63, vel_ratio=0.1, pos_horiz_ratio=0.1, pos_vert_ratio=0.1,
-                           mag_ratio=0.1, pos_horiz_accuracy=0.05, pos_vert_accuracy=0.05)
-                self._emit(drone, "GPS_RAW_INT", lat=107765000, lon=1067000000, eph=80, epv=120, fix_type=6, satellites_visible=18)
-                self._emit(drone, "GLOBAL_POSITION_INT", time_boot_ms=int((now-self.started)*1000), lat=107765000,
-                           lon=1067000000, alt=int((10-drone.position.z)*1000), relative_alt=int(-drone.position.z*1000),
-                           vx=int(drone.velocity.x*100), vy=int(drone.velocity.y*100), vz=int(drone.velocity.z*100))
+        for drone in self.drones.values():
+            if not drone.frozen:
+                stamp = int((now-self.started)*1000)
+                p, v = drone.position, drone.velocity
+                self._emit(drone, "LOCAL_POSITION_NED", time_boot_ms=stamp, x=p.x, y=p.y, z=p.z, vx=v.x, vy=v.y, vz=v.z)
+                self._emit(drone, "ATTITUDE", time_boot_ms=stamp, roll=0., pitch=0., yaw=0., rollspeed=0., pitchspeed=0., yawspeed=0.)
+                self._emit(drone, "VFR_HUD", groundspeed=math.hypot(v.x, v.y), climb=-v.z, throttle=50 if drone.armed else 0)
+                target = drone.target
+                if target:
+                    pos, vel = target.position, target.velocity
+                    self._emit(drone, "POSITION_TARGET_LOCAL_NED", time_boot_ms=stamp, coordinate_frame=1,
+                               type_mask=56 if pos else 7, x=pos.x if pos else 0., y=pos.y if pos else 0., z=pos.z if pos else 0.,
+                               vx=vel.x if vel else 0., vy=vel.y if vel else 0., vz=vel.z if vel else 0.)
+        for drone in self.drones.values():
+            self._heartbeat(drone)
+            self._emit(drone, "SYS_STATUS", onboard_control_sensors_present=0,
+                       onboard_control_sensors_enabled=0, onboard_control_sensors_health=0)
+            self._emit(drone, "EXTENDED_SYS_STATE", landed_state=drone.landed)
+            self._emit(drone, "HOME_POSITION", altitude=10000)
+            self._emit(drone, "BATTERY_STATUS", id=0, voltages=[12000]+[65535]*9, current_battery=200,
+                       battery_remaining=90, current_consumed=100, temperature=2500, time_remaining=600, charge_state=1)
+            self._emit(drone, "ESTIMATOR_STATUS", flags=63, vel_ratio=0.1, pos_horiz_ratio=0.1, pos_vert_ratio=0.1,
+                       mag_ratio=0.1, pos_horiz_accuracy=0.05, pos_vert_accuracy=0.05)
+            self._emit(drone, "GPS_RAW_INT", lat=107765000, lon=1067000000, eph=80, epv=120, fix_type=6, satellites_visible=18)
+            self._emit(drone, "ALTITUDE", altitude_amsl=10-drone.position.z,
+                       altitude_relative=-drone.position.z)
+            self._emit(drone, "GLOBAL_POSITION_INT", time_boot_ms=int((now-self.started)*1000), lat=107765000,
+                       lon=1067000000, alt=int((10-drone.position.z)*1000), relative_alt=int(-drone.position.z*1000),
+                       vx=int(drone.velocity.x*100), vy=int(drone.velocity.y*100), vz=int(drone.velocity.z*100))
 
-    def _heartbeat(self, drone):
+    def _heartbeat(self, drone, force=False):
         custom = {"POSCTL": (3, 0), "HOLD": (4, 3), "OFFBOARD": (6, 0), "TAKEOFF": (4, 2), "LAND": (4, 6), "RTL": (4, 5)}[drone.mode]
-        self._emit(drone, "HEARTBEAT", autopilot=12, type=2, base_mode=1 | (128 if drone.armed else 0),
+        self._emit(drone, "HEARTBEAT", _force=force, autopilot=12, type=2, base_mode=1 | (128 if drone.armed else 0),
                    custom_mode=(custom[0] << 16) | (custom[1] << 24), system_status=4 if drone.armed else 3)
 
     def command(self, system_id, component_id, command, params):
@@ -151,12 +173,20 @@ class SimTransport(Transport):
                         drone.target = Target(system_id, Vec3(p.x, p.y, 0))
                     else:
                         result = 3
-                elif command != 511:
+                elif command == 511:
+                    message, interval = int(params[0]), params[1]
+                    if message not in self.MESSAGE_IDS.values():
+                        result = 3
+                    else:
+                        self.stream_rates[system_id, message] = (1e6/interval if interval > 0
+                                                                 else 0 if interval == -1 else STREAMS[message])
+                else:
                     result = 3
             if result != 0:
                 self._emit(drone, "STATUSTEXT", severity=3, text="Simulator: command rejected", id=0, chunk_seq=0)
             self._emit(drone, "COMMAND_ACK", command=command, result=result, progress=100)
-            self._heartbeat(drone)
+            if command != 511:
+                self._heartbeat(drone, force=True)
 
     def setpoint(self, target, component_id):
         with self.lock:

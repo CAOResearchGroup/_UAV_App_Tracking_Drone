@@ -13,6 +13,7 @@ import pyqtgraph as pg
 from .models import FACT_GROUPS, FACT_NAMES
 from .plot_data import PlotHistory, UNITS, group_by_unit, validate_fields
 from .plot_resize import ScopeResizeHandle, layout_resize_handles
+from .telemetry_rates import DEFAULT_HZ, GROUP_STREAMS, MAX_HZ
 
 Qt = QtCore.Qt
 MIME = "application/x-multi-drone-telemetry"
@@ -361,9 +362,11 @@ class ChartScope(QtWidgets.QMdiSubWindow):
 
 
 class PlotWindow(QtWidgets.QMainWindow):
-    def __init__(self, frames, stop):
+    def __init__(self, frames, stop, requests=None):
         super().__init__()
         self.frames, self.stop = frames, stop
+        self.requests = requests
+        self.rate_edits = {}
         self.history = PlotHistory()
         self.charts, self.items, self.drone_items = {}, {}, {}
         self.default_ids = set()
@@ -435,6 +438,24 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.search.setPlaceholderText("Lọc tên: localPosition, battery…")
         self.search.textChanged.connect(self.filter_fields)
         layout.addWidget(self.search)
+        rates_box = QtWidgets.QGroupBox("Tần số telemetry theo drone / nhóm")
+        rates_layout = QtWidgets.QFormLayout(rates_box)
+        self.rate_drone = QtWidgets.QComboBox()
+        self.rate_group = QtWidgets.QComboBox()
+        self.rate_group.addItems(list(GROUP_STREAMS))
+        self.rate_hz = QtWidgets.QComboBox()
+        rates_layout.addRow("Drone", self.rate_drone)
+        rates_layout.addRow("Nhóm", self.rate_group)
+        rates_layout.addRow("Yêu cầu", self.rate_hz)
+        self.rate_status = QtWidgets.QLabel("Chờ kết nối")
+        self.rate_status.setWordWrap(True)
+        rates_layout.addRow(self.rate_status)
+        self.rate_drone.currentIndexChanged.connect(self.select_rate_group)
+        self.rate_group.currentIndexChanged.connect(self.select_rate_group)
+        self.rate_hz.activated.connect(self.apply_rate)
+        self.rate_hz.setToolTip("Chọn để yêu cầu ngay. Tần số thực nhận phụ thuộc drone và đường truyền.")
+        self.select_rate_group()
+        layout.addWidget(rates_box)
         self.tree = FieldTree(self)
         layout.addWidget(self.tree)
         button = QtWidgets.QPushButton("Vẽ các tham số đã chọn")
@@ -484,6 +505,57 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(100)
+
+    def select_rate_group(self, *_):
+        group, n = self.rate_group.currentText(), self.rate_drone.currentData()
+        requested = self.history.frame.get("telemetry_rates", {}).get(n, {}).get(group, {})
+        hz = self.rate_edits.get((n, group), requested.get("hz", DEFAULT_HZ[group]))
+        self.rate_hz.clear()
+        for value in range(5, MAX_HZ[group]+1, 5):
+            self.rate_hz.addItem(f"{value} Hz", value)
+        self.rate_hz.setCurrentIndex(self.rate_hz.findData(hz))
+        self.update_rate_status()
+
+    def apply_rate(self, *_):
+        n, group, hz = self.rate_drone.currentData(), self.rate_group.currentText(), self.rate_hz.currentData()
+        if n is None or self.requests is None or not self.history.frame.get("connected"):
+            self.rate_status.setText("Chưa kết nối để đổi tần số")
+            return
+        try:
+            self.requests.put_nowait({"system_id": n, "group": group, "hz": hz, "epoch": self.history.epoch})
+        except queue.Full:
+            self.rate_status.setText("Hàng đợi đầy; chọn lại tần số để thử lại")
+            return
+        self.rate_edits[n, group] = hz
+        self.rate_status.setText(f"Đang gửi yêu cầu {hz} Hz…")
+
+    def update_rate_status(self):
+        n, group = self.rate_drone.currentData(), self.rate_group.currentText()
+        connected = self.history.frame.get("connected", False)
+        self.rate_hz.setEnabled(n is not None and connected and self.requests is not None)
+        if not connected or n is None:
+            self.rate_status.setText("Chờ kết nối")
+            return
+        info = self.history.frame.get("telemetry_rates", {}).get(n, {}).get(group, {})
+        requested = info.get("hz", DEFAULT_HZ[group])
+        edit = self.rate_edits.get((n, group))
+        if edit is not None and requested != edit:
+            self.rate_status.setText(f"Đang gửi yêu cầu {edit} Hz…")
+            return
+        self.rate_edits.pop((n, group), None)
+        statuses = info.get("messages", {})
+        state = "; ".join(dict.fromkeys(statuses.values())) or "Chưa yêu cầu"
+        names = [f"{group}.{name}" for name in FACT_GROUPS[group]]
+        measured = self.history.measured_rates(n, names, time.monotonic())
+        values = list(measured.values()) or [0.]
+        actual = f"{min(values):.1f}–{max(values):.1f}" if max(values)-min(values) > .1 else f"{max(values):.1f}"
+        text = f"Yêu cầu: {requested} Hz · {state}\nThực nhận: {actual} Hz (theo từng thông số)"
+        if self.history.missed_batches:
+            text += f"\nMất {self.history.missed_batches} gói mẫu đồ thị do quá tải"
+        self.rate_status.setText(text)
+        details = [f"{name}: {hz:.1f} Hz" for name, hz in measured.items()]
+        details += [f"MAVLink {message}: {status}" for message, status in statuses.items()]
+        self.rate_status.setToolTip("\n".join(details))
 
     def add_chart(self, system_id, fields):
         fields = validate_fields(system_id, fields)
@@ -666,6 +738,7 @@ class PlotWindow(QtWidgets.QMainWindow):
     def update_tree(self, now):
         for n, state in sorted(self.history.frame.get("vehicles", {}).items()):
             if n not in self.drone_items:
+                self.rate_drone.addItem(f"Drone {n}", n)
                 drone = QtWidgets.QTreeWidgetItem(self.tree)
                 self.drone_items[n] = drone
                 drone.setExpanded(True)
@@ -736,13 +809,16 @@ class PlotWindow(QtWidgets.QMainWindow):
         if self.stop.is_set():
             self.close()
             return
-        while True:
+        # Bound work per tick so a busy producer cannot starve UI interaction.
+        for _ in range(2):
             try:
                 frame = self.frames.get_nowait()
                 if self.history.epoch is not None and frame["epoch"] != self.history.epoch:
                     self.tree.clear()
                     self.items.clear()
                     self.drone_items.clear()
+                    self.rate_edits.clear()
+                    self.rate_drone.clear()
                     self.message_drone.blockSignals(True)
                     self.message_drone.clear()
                     self.message_drone.addItem("Tất cả drone", None)
@@ -755,6 +831,7 @@ class PlotWindow(QtWidgets.QMainWindow):
         if now-self.last_tree_update > .3:
             self.update_tree(now)
             self.update_messages()
+            self.update_rate_status()
             self.last_tree_update = now
         if not self.pause.isChecked():
             span = int(self.span.currentText().split()[0])
@@ -770,10 +847,10 @@ class PlotWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 
-def run_window(frames, stop, ready):
+def run_window(frames, stop, ready, requests=None):
     app = QtWidgets.QApplication([])
     app.setApplicationName("Multi-Drone Telemetry")
-    window = PlotWindow(frames, stop)
+    window = PlotWindow(frames, stop, requests)
     window.show()
     ready.send({"ready": True})
     app.exec()

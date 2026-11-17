@@ -43,7 +43,7 @@ def group_by_unit(fields):
     return list(groups.values())
 
 
-def snapshot_frame(app, now):
+def snapshot_frame(app, now, sample_cursor=None):
     """Copy scalar telemetry under the registry lock, without touching transport."""
     registry = app.registry
     with registry.lock:
@@ -53,21 +53,39 @@ def snapshot_frame(app, now):
                 "facts": {name: (sample.value, sample.received_at) for name, sample in s.facts.items()}}
             for n, s in registry.vehicles.items()
         }
-    return {"epoch": id(registry), "now": now, "connected": app.transport is not None,
+        batches, missed, sequence = [], 0, 0
+        telemetry = getattr(app, "telemetry", None)
+        if sample_cursor is not None and telemetry is not None and telemetry.registry is registry:
+            after = sample_cursor[1] if sample_cursor[0] == id(registry) else 0
+            sequence = telemetry.sample_sequence
+            for batch in reversed(telemetry.sample_batches):
+                if batch[0] <= after:
+                    break
+                batches.append(batch)
+            batches.reverse()
+            if batches:
+                missed = max(0, batches[0][0]-after-1)
+    result = {"epoch": id(registry), "now": now, "connected": app.transport is not None,
             "endpoint": app.endpoint, "vehicles": vehicles,
             "timeouts": {"heartbeat": app.config.heartbeat_timeout, "state": app.config.state_timeout,
                          "health": app.config.health_timeout}}
+    if sample_cursor is not None:
+        result.update(samples=batches, sample_cursor=(id(registry), sequence), missed_batches=missed,
+                      telemetry_rates=app.telemetry_rates.snapshot())
+    return result
 
 
 class PlotHistory:
-    """Bounded, decimated display history. Never synthesize samples for stale data."""
-    def __init__(self, seconds=120, max_points=2400):
+    """Bounded received-sample history. Rendering may batch samples but does not resample them."""
+    def __init__(self, seconds=120, max_points=12002):
         self.seconds, self.max_points = seconds, max_points
         self.epoch = self.started = None
         self.frame = {}
         self.points = {}
         self.last_stamp = {}
         self.live = {}
+        self.sample_sequence = 0
+        self.missed_batches = 0
 
     def timeout(self, name):
         limits = self.frame.get("timeouts", {})
@@ -88,9 +106,54 @@ class PlotHistory:
             self.points.clear()
             self.last_stamp.clear()
             self.live.clear()
-            self.epoch, self.started = frame["epoch"], frame["now"]
+            self.sample_sequence = self.missed_batches = 0
+            samples = frame.get("samples", [])
+            self.epoch, self.started = frame["epoch"], samples[0][1] if samples else frame["now"]
         self.frame = frame
+        batches = frame.get("samples", [])
+        missed = (frame.get("missed_batches", 0)
+                  if batches and batches[-1][0] > self.sample_sequence else 0)
+        self.missed_batches += missed
+        if missed:
+            for key, points in self.points.items():
+                if points:
+                    points.append((points[-1][0], math.nan))
+                self.live[key] = False
+        for sequence, stamp, n, changes in batches:
+            if sequence <= self.sample_sequence:
+                continue
+            for name, value in changes:
+                self._append(n, name, value, stamp)
+            self.sample_sequence = sequence
         self.advance(frame["now"])
+
+    def _append(self, n, name, value, stamp):
+        key = (n, name)
+        last = self.last_stamp.get(key)
+        if last is not None and stamp <= last:
+            return
+        points = self.points.setdefault(key, deque(maxlen=self.max_points))
+        if last is not None and stamp-last > self.timeout(name) and self.live.get(key):
+            points.append(((stamp+last)/2-self.started, math.nan))
+        valid = isinstance(value, (int, float)) and math.isfinite(value)
+        points.append((stamp-self.started, value if valid else math.nan))
+        self.last_stamp[key], self.live[key] = stamp, valid
+
+    def measured_rates(self, system_id, names, now, seconds=2):
+        rates = {}
+        if self.started is None:
+            return rates
+        cutoff = now-self.started-seconds
+        for name in names:
+            stamps = []
+            for stamp, value in reversed(self.points.get((system_id, name), ())):
+                if stamp < cutoff:
+                    break
+                if math.isfinite(value):
+                    stamps.append(stamp)
+            rates[name] = ((len(stamps)-1)/(stamps[0]-stamps[-1])
+                           if len(stamps) > 1 and now-self.started-stamps[0] < 1 else 0.)
+        return rates
 
     def advance(self, now):
         if self.started is None:
@@ -104,7 +167,7 @@ class PlotHistory:
                     if self.live.get(key):
                         points.append((now-self.started, math.nan))
                     self.live[key] = False
-                elif stamp != self.last_stamp.get(key):
+                elif "samples" not in self.frame and stamp != self.last_stamp.get(key):
                     # Break lines across gaps even if the GUI missed intermediate frames.
                     last = self.last_stamp.get(key)
                     if last is not None and stamp-last > self.timeout(name) and self.live.get(key):

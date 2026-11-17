@@ -10,10 +10,10 @@ import time
 from .plot_data import snapshot_frame
 
 
-def _plot_process(frames, stop, ready):
+def _plot_process(frames, stop, ready, requests):
     try:
         from .plot_window import run_window
-        run_window(frames, stop, ready)
+        run_window(frames, stop, ready, requests)
     except Exception as exc:
         ready.send({"error": f"{type(exc).__name__}: {exc}"})
     finally:
@@ -24,6 +24,7 @@ class PlotService:
     def __init__(self, app):
         self.app = app
         self.process = self.thread = self.frames = self.stop = None
+        self.requests = None
 
     def status(self):
         return {"running": bool(self.process and self.process.is_alive()),
@@ -38,8 +39,9 @@ class PlotService:
             raise RuntimeError("Install plots first: python -m pip install -e '.[plots]'")
         ctx = mp.get_context("spawn")
         self.frames, self.stop = ctx.Queue(maxsize=2), ctx.Event()
+        self.requests = ctx.Queue(maxsize=32)
         reader, writer = ctx.Pipe(duplex=False)
-        self.process = ctx.Process(target=_plot_process, args=(self.frames, self.stop, writer),
+        self.process = ctx.Process(target=_plot_process, args=(self.frames, self.stop, writer, self.requests),
                                    name="telemetry-plots", daemon=True)
         try:
             self.process.start()
@@ -60,12 +62,26 @@ class PlotService:
         return self.status()
 
     def _publish(self):
+        cursor = (None, 0)
         while not self.stop.is_set() and self.process.is_alive():
-            frame = snapshot_frame(self.app, time.monotonic())
+            # Requests are telemetry-only and processed away from Qt and the RX thread.
+            for _ in range(32):
+                try:
+                    request = self.requests.get_nowait() if self.requests is not None else None
+                    if request is None:
+                        break
+                except queue.Empty:
+                    break
+                try:
+                    self.app.set_telemetry_rate(**request)
+                except (ValueError, TypeError) as exc:
+                    self.app.logger.write("telemetry_rate_rejected", error=str(exc))
+            frame = snapshot_frame(self.app, time.monotonic(), cursor)
             try:
                 self.frames.put_nowait(frame)
+                cursor = frame["sample_cursor"]
             except queue.Full:
-                # Drop display frames, never wait on GUI rendering or Qt's event loop.
+                # Keep the cursor: the next batch retries all still-buffered samples.
                 pass
             self.stop.wait(.1)
 
@@ -95,4 +111,8 @@ class PlotService:
             # A force-killed consumer may leave a damaged pipe; never join its feeder.
             self.frames.cancel_join_thread()
             self.frames.close()
+        if self.requests:
+            self.requests.cancel_join_thread()
+            self.requests.close()
+        self.requests = None
         self.process = self.thread = self.frames = self.stop = None

@@ -154,6 +154,52 @@ class PlotWindowTests(unittest.TestCase):
         self.assertEqual(table.topLevelItemCount(), 1)
         self.assertEqual(table.topLevelItem(0).text(1), "2")
 
+    def test_rate_selector_sends_only_selected_drone_group_and_clears_on_reconnect(self):
+        from multi_drone.telemetry_rates import TelemetryRates, MAX_HZ
+        self.window.requests = queue.Queue(maxsize=1)
+        rates = TelemetryRates()
+        rates.discover(1)
+        rates.discover(4)
+        now = time.monotonic()
+        data = frame(now)
+        data["vehicles"][4] = dict(data["vehicles"][1])
+        data["telemetry_rates"] = rates.snapshot()
+        self.frames.put(data)
+        self.window.poll()
+        self.window.rate_drone.setCurrentIndex(self.window.rate_drone.findData(4))
+        for group, maximum in MAX_HZ.items():
+            self.window.rate_group.setCurrentText(group)
+            self.assertEqual([self.window.rate_hz.itemData(i) for i in range(self.window.rate_hz.count())],
+                             list(range(5, maximum+1, 5)))
+        self.window.rate_group.setCurrentText("vehicle")
+        self.window.rate_hz.setCurrentIndex(self.window.rate_hz.findData(100))
+        self.window.rate_hz.activated.emit(self.window.rate_hz.currentIndex())
+        self.assertEqual(self.window.requests.get_nowait(),
+                         {"system_id": 4, "group": "vehicle", "hz": 100, "epoch": 1})
+        data["epoch"] = 2
+        data["vehicles"].pop(4)
+        self.frames.put(data)
+        self.window.poll()
+        self.assertEqual(self.window.rate_edits, {})
+        self.assertEqual(self.window.rate_drone.findData(4), -1)
+
+    def test_batched_samples_survive_pause_and_refresh_cutoff(self):
+        now = time.monotonic()
+        self.window.history.update(frame(now))
+        chart = self.window.add_chart(1, ["localPosition.x"])
+        self.window.pause.setChecked(True)
+        with patch("multi_drone.plot_window.time.monotonic", return_value=now+.05):
+            self.window.refresh_all_button.click()
+        data = frame(now+.1)
+        data["samples"] = [(i+1, now+i*.01, 1, [("localPosition.x", i)]) for i in range(1, 10)]
+        self.frames.put(data)
+        with patch("multi_drone.plot_window.time.monotonic", return_value=now+.1):
+            self.window.poll()
+            self.assertEqual(self.curve_data(chart), ([], []))
+            self.window.pause.setChecked(False)
+            self.window.poll()
+        self.assertEqual(self.curve_data(chart)[1], [5, 6, 7, 8, 9])
+
     def test_reconnect_clears_old_notifications_and_filters(self):
         now = time.monotonic()
         data = frame(now)

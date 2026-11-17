@@ -60,7 +60,11 @@ Ctrl/Cmd hoặc Shift + click nhiều trường, rồi bấm **Vẽ các tham s�
 
 Cuộn chuột hoặc **Zoom +/−** để phóng/thu; kéo chuột để pan. Bật **Khoanh zoom** rồi kéo chọn vùng phóng to. Khi thao tác, ô tự giữ vùng nhìn dù dữ liệu vẫn cập nhật; **Vừa dữ liệu** căn vừa lịch sử hiện có, **Bám lại** trở về dữ liệu mới nhất. Bật lại **Bám thời gian** để tất cả ô tiếp tục bám. **Làm mới** vẫn dùng để bắt đầu lượt vẽ mới, khác với căn vừa dữ liệu.
 
-Hiển thị tối đa 10 Hz, lịch sử 120 giây, hỗ trợ 52 trường telemetry; dữ liệu thiếu/cũ không được vẽ thành số 0. Đồ thị là tiến trình chỉ đọc riêng, đóng nó không dừng điều khiển.
+Trong cột trái, **Tần số telemetry theo drone / nhóm** cho chọn drone, nhóm rồi tần số; lựa chọn được gửi ngay. `vehicle`: 5–100 Hz; `localPosition` và `localPositionSetpoint`: 5–50 Hz; `gps`, `estimatorStatus`, `battery`: 5–30 Hz. Tất cả bước 5 Hz. Mặc định `vehicle` và `localPosition` là 20 Hz, nhóm khác 5 Hz. Lựa chọn độc lập theo drone/nhóm, giữ khi đóng/mở đồ thị trong cùng kết nối, đặt lại mặc định khi kết nối lại.
+
+Khung chọn hiển thị trạng thái ACK và khoảng tần số **thực nhận** của từng thông số trong 2 giây gần nhất; rê chuột để xem chi tiết. PX4 nhận yêu cầu không có nghĩa mọi thông số đạt đủ Hz: còn phụ thuộc nguồn dữ liệu và băng thông. `vehicle` gồm nhiều message; độ cao ưu tiên `GLOBAL_POSITION_INT`, dùng `ALTITUDE` dự phòng; `flightTime` được tính khi có attitude lúc đang armed. Setpoint có thể chưa được phát hoặc có trường bị mask. App không tự thay baudrate/băng thông hay cấu hình cảm biến.
+
+Giao diện vẽ theo lô tối đa 10 lần/giây nhưng giữ từng mẫu thực nhận, không lấy lại mẫu xuống 10 Hz và không nội suy để bù Hz còn thiếu. Lịch sử 120 giây, tối đa 12.002 điểm/trường, đủ 100 Hz; bộ đệm truyền đồ thị giữ tối đa 20.000 gói mẫu. Khi GUI chậm, mẫu được gửi lại từ bộ đệm; nếu tràn sẽ báo số gói mẫu mất và ngắt đường tại khoảng thiếu. Hỗ trợ 52 trường telemetry; dữ liệu thiếu/cũ không vẽ thành số 0. Cửa sổ gửi yêu cầu tần số telemetry, không gửi lệnh bay; đóng nó không dừng điều khiển. `rate_hz` trong config vẫn là tần số vòng điều khiển riêng.
 
 **Hướng dẫn từ setup → mô phỏng → router/PX4 → bay đơn/đội hình → kéo/thả đồ thị:** [docs/quickstart.md](docs/quickstart.md).
 

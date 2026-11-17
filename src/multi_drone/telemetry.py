@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 
 from .models import FACT_NAMES, Packet, Registry, Sample, Vec3, VehicleState
 from .notifications import StatusTextAssembler, add_notification
@@ -35,6 +36,9 @@ class Telemetry:
     def __init__(self, registry: Registry, battery_id: int = 0):
         self.registry, self.battery_id = registry, battery_id
         self.status_text = StatusTextAssembler()
+        self.sample_batches = deque(maxlen=20000)
+        self.sample_sequence = 0
+        self.euler_received = {}
 
     def tick(self, now):
         with self.registry.lock:
@@ -59,7 +63,10 @@ class Telemetry:
             if not self._accept_timestamp(state, kind, d.get("time_boot_ms")):
                 return False
             state.messages += 1
-            set_fact = lambda name, value: state.set_fact(name, value, now)
+            changes = []
+            def set_fact(name, value):
+                state.set_fact(name, value, now)
+                changes.append((name, value))
             if kind == "HEARTBEAT":
                 was_armed = state.armed
                 state.heartbeat_at = now
@@ -68,22 +75,28 @@ class Telemetry:
                 state.system_status = d.get("system_status")
                 if state.armed and not was_armed:
                     state.armed_since = now
-                if state.armed_since is not None:
+                if state.armed_since is not None and (state.attitude_at is None or now-state.attitude_at > .5):
                     set_fact("vehicle.flightTime", max(0, now - state.armed_since))
                 if not state.armed:
                     state.armed_since = None
             elif kind in ("ATTITUDE", "ATTITUDE_QUATERNION"):
                 if kind == "ATTITUDE_QUATERNION":
+                    if now-self.euler_received.get(packet.system_id, -math.inf) <= .5:
+                        return True  # ATTITUDE is primary; do not double-sample the same facts.
                     roll, pitch, yaw = quaternion_euler([d[f"q{i}"] for i in range(1, 5)])
                 else:
                     roll, pitch, yaw = d["roll"], d["pitch"], d["yaw"]
                 if not all(math.isfinite(v) for v in (roll, pitch, yaw)):
                     return False
+                if kind == "ATTITUDE":
+                    self.euler_received[packet.system_id] = now
                 state.yaw, state.attitude_at = yaw, now
                 for name, val in (("roll", roll), ("pitch", pitch), ("yaw", yaw % (2*math.pi))):
                     set_fact("vehicle." + name, math.degrees(val))
                 for name, source in (("rollRate", "rollspeed"), ("pitchRate", "pitchspeed"), ("yawRate", "yawspeed")):
                     set_fact("vehicle." + name, valid_number(d.get(source), scale=180/math.pi))
+                if state.armed_since is not None:
+                    set_fact("vehicle.flightTime", max(0, now-state.armed_since))
             elif kind == "LOCAL_POSITION_NED":
                 position = Vec3(d["x"], d["y"], d["z"])
                 velocity = Vec3(d["vx"], d["vy"], d["vz"])
@@ -103,8 +116,10 @@ class Telemetry:
                 set_fact("vehicle.altitudeAMSL", d["alt"] / 1000)
                 set_fact("vehicle.altitudeRelative", d["relative_alt"] / 1000)
             elif kind == "ALTITUDE":
-                set_fact("vehicle.altitudeAMSL", valid_number(d.get("altitude_amsl")))
-                set_fact("vehicle.altitudeRelative", valid_number(d.get("altitude_relative")))
+                # GLOBAL_POSITION_INT is the primary altitude source; avoid double sampling.
+                if now-state.global_position.get("received_at", -math.inf) > 1:
+                    set_fact("vehicle.altitudeAMSL", valid_number(d.get("altitude_amsl")))
+                    set_fact("vehicle.altitudeRelative", valid_number(d.get("altitude_relative")))
             elif kind == "VFR_HUD":
                 for name, source in (("groundSpeed", "groundspeed"), ("climbRate", "climb"), ("throttlePct", "throttle")):
                     set_fact("vehicle." + name, valid_number(d.get(source)))
@@ -145,6 +160,9 @@ class Telemetry:
             elif kind == "STATUSTEXT":
                 for severity, text, complete in self.status_text.feed(packet, now):
                     add_notification(state, severity, text, now, complete=complete)
+            if changes:
+                self.sample_sequence += 1
+                self.sample_batches.append((self.sample_sequence, now, packet.system_id, changes))
             return True
 
     @staticmethod

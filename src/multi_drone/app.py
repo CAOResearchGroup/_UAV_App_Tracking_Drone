@@ -16,9 +16,7 @@ from .plotting import PlotService
 from .safety import Safety, SafetyError
 from .simulator import SimTransport
 from .telemetry import Telemetry
-
-
-STREAMS = {0: 1, 1: 2, 24: 2, 30: 20, 32: 20, 33: 5, 74: 5, 85: 5, 141: 2, 147: 2, 230: 2, 242: 0.5, 245: 2}
+from .telemetry_rates import TelemetryRates
 
 
 class App:
@@ -29,6 +27,7 @@ class App:
         self.safety = Safety(config)
         self.transport = self.coordinator = self.commands = self.parameters = None
         self.registry = Registry()
+        self.telemetry_rates = TelemetryRates()
         self.stop_event = threading.Event()
         self.threads = []
         self.last_error = None
@@ -42,12 +41,13 @@ class App:
         self.endpoint, self.transport = endpoint, new_transport
         self.registry = Registry()
         self.telemetry = Telemetry(self.registry, self.config.battery_id)
+        self.telemetry_rates = TelemetryRates()
         self.commands = CommandService(new_transport, self.logger, self.config.source_system)
         self.parameters = ParameterService(new_transport, self.logger)
         self.coordinator = Coordinator(self.config, self.registry, self.safety, self.commands, new_transport, self.runner, self.logger)
         self.stop_event = threading.Event()
         self.last_error = None
-        self._stream_queue, self._stream_future, self._discovered = [], None, set()
+        self._discovered = set()
         self.threads = [threading.Thread(target=self._receive_loop, name="mavlink-io", daemon=True),
                         threading.Thread(target=self._control_loop, name="formation-control", daemon=True)]
         for thread in self.threads:
@@ -70,8 +70,7 @@ class App:
                                           message=packet.kind, sequence=packet.sequence, data=self._clean(packet.data))
                         if packet.kind == "HEARTBEAT" and packet.system_id not in self._discovered:
                             self._discovered.add(packet.system_id)
-                            if self.endpoint != "sim":
-                                self.request_streams(packet.system_id)
+                            self.request_streams(packet.system_id)
                 if now-last_heartbeat >= 1:
                     self.transport.heartbeat()
                     last_heartbeat = now
@@ -79,12 +78,8 @@ class App:
                         self.logger.write("vehicle_state", **state.as_dict(now))
                 self.commands.tick(now)
                 self.parameters.tick(now)
-                if (self._stream_future is None or self._stream_future.done()) and self._stream_queue:
-                    system_id, message_id, rate = self._stream_queue.pop(0)
-                    state = self.registry.snapshot().get(system_id)
-                    if state:
-                        self._stream_future = self.commands.send(system_id, state.component_id, 511,
-                            [float(message_id), 1e6/rate], "request-stream", timeout=1)
+                # This RX thread owns discovery; rate requests only need component IDs.
+                self.telemetry_rates.tick(self.commands, self.registry.vehicles)
             except (ValueError, KeyError, TypeError, OverflowError) as exc:
                 self.logger.write("packet_rejected", error=str(exc))
             except Exception as exc:
@@ -125,7 +120,12 @@ class App:
         raise TimeoutError(f"Discovered fewer than {count} PX4 vehicles")
 
     def request_streams(self, system_id):
-        self._stream_queue.extend((system_id, message, rate) for message, rate in STREAMS.items())
+        self.telemetry_rates.discover(system_id)
+
+    def set_telemetry_rate(self, system_id, group, hz, epoch):
+        if self.transport is None or epoch != id(self.registry):
+            raise ValueError("Kết nối đã thay đổi; chọn lại drone")
+        self.telemetry_rates.set_group(system_id, group, hz)
 
     def targets(self, token):
         if self.coordinator is None:

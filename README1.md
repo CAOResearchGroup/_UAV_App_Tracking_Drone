@@ -48,7 +48,7 @@ Lưu và khởi động lại module. Kiểm tra module xuất hiện trong danh
 Chạy trong Terminal; bỏ qua hai dòng setup nếu đã cài môi trường:
 
 ```sh
-cd /Users/vungocson0503/Desktop/Python_Multi_Drone
+cd /[...]/Python_Multi_Drone
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[mavlink,plots]'
 .venv/bin/python run_cli.py --config config/px4.json --connect udpin:0.0.0.0:14550 --plots
